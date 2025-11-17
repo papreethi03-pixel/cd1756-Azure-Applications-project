@@ -1,216 +1,161 @@
 """
-Routes and views for the Flask application.
+Routes and views for the flask application.
 """
 
 from datetime import datetime
-from typing import Optional
-
-from flask import (
-    render_template,
-    flash,
-    redirect,
-    request,
-    session,
-    url_for,
-)
+from flask import render_template, flash, redirect, request, session, url_for
 from werkzeug.urls import url_parse
 from config import Config
-from FlaskWebProject import app, db, LOG
+from FlaskWebProject import app, db
 from FlaskWebProject.forms import LoginForm, PostForm
-from flask_login import (
-    current_user,
-    login_user,
-    logout_user,
-    login_required,
-)
-
+from flask_login import current_user, login_user, logout_user, login_required
 from FlaskWebProject.models import User, Post
+from FlaskWebProject import LOG
 import msal
 import uuid
 
-# ----------------------------------------------------------------------
-# Global URL for uploaded images (Azure Blob Storage)
-# ----------------------------------------------------------------------
-imageSourceUrl = (
-    f"https://{app.config['BLOB_ACCOUNT']}"
-    f".blob.core.windows.net/{app.config['BLOB_CONTAINER']}/"
-)
+imageSourceUrl = 'https://'+ app.config['BLOB_ACCOUNT']  + '.blob.core.windows.net/' + app.config['BLOB_CONTAINER']  + '/'
 
-
-# ----------------------------------------------------------------------
-# Home page – list all posts
-# ----------------------------------------------------------------------
-@app.route("/")
-@app.route("/home")
+@app.route('/')
+@app.route('/home')
 @login_required
-def home() -> str:
+def home():
     user = User.query.filter_by(username=current_user.username).first_or_404()
     posts = Post.query.all()
     return render_template(
-        "index.html",
-        title="Home Page",
-        posts=posts,
+        'index.html',
+        title='Home Page',
+        posts=posts
     )
 
-
-# ----------------------------------------------------------------------
-# Create a new post
-# ----------------------------------------------------------------------
-@app.route("/new_post", methods=["GET", "POST"])
+@app.route('/new_post', methods=['GET', 'POST'])
 @login_required
-def new_post() -> str:
+def new_post():
     form = PostForm(request.form)
     if form.validate_on_submit():
         post = Post()
-        post.save_changes(form, request.files["image_path"], current_user.id, new=True)
-        return redirect(url_for("home"))
-
+        post.save_changes(form, request.files['image_path'], current_user.id, new=True)
+        # LOG Informational
+        LOG.info('INFO: New post added by user: ' + str(current_user.id))
+        return redirect(url_for('home'))
     return render_template(
-        "post.html",
-        title="Create Post",
+        'post.html',
+        title='Create Post',
         imageSource=imageSourceUrl,
-        form=form,
+        form=form
     )
 
 
-# ----------------------------------------------------------------------
-# Edit an existing post
-# ----------------------------------------------------------------------
-@app.route("/post/<int:id>", methods=["GET", "POST"])
+@app.route('/post/<int:id>', methods=['GET', 'POST'])
 @login_required
-def post(id: int) -> str:
-    post_obj = Post.query.get_or_404(id)
-    form = PostForm(formdata=request.form, obj=post_obj)
-
+def post(id):
+    post = Post.query.get(int(id))
+    form = PostForm(formdata=request.form, obj=post)
     if form.validate_on_submit():
-        post_obj.save_changes(form, request.files["image_path"], current_user.id)
-        return redirect(url_for("home"))
-
+        post.save_changes(form, request.files['image_path'], current_user.id)
+        # LOG Informational
+        LOG.info('INFO: Post ' + str(id) + ' edited by user: ' + str(current_user.id))
+        return redirect(url_for('home'))
     return render_template(
-        "post.html",
-        title="Edit Post",
+        'post.html',
+        title='Edit Post',
         imageSource=imageSourceUrl,
-        form=form,
+        form=form
     )
 
-
-# ----------------------------------------------------------------------
-# Local login (username / password)
-# ----------------------------------------------------------------------
-@app.route("/login", methods=["GET", "POST"])
-def login() -> str:
+@app.route('/login', methods=['GET', 'POST'])
+def login():
     if current_user.is_authenticated:
-        return redirect(url_for("home"))
-
+        # LOG Informational
+        LOG.info('INFO: User ' + str(current_user.id) + ' is authenticated...')
+        return redirect(url_for('home'))
     form = LoginForm()
     if form.validate_on_submit():
         user = User.query.filter_by(username=form.username.data).first()
         if user is None or not user.check_password(form.password.data):
-            flash("Invalid username or password")
-            LOG.warning(
-                "WARNING: Login unsuccessful – invalid username or password for user: %s",
-                form.username.data,
-            )
-            return redirect(url_for("login"))
-
+            flash('Invalid username or password')
+            # LOG Unsuccessful login
+            LOG.warning('WARNING: Login Unsucessful....Invalid username or password for user:' + str(user))
+            return redirect(url_for('login'))
         login_user(user, remember=form.remember_me.data)
-        next_page = request.args.get("next")
-        if not next_page or url_parse(next_page).netloc != "":
-            next_page = url_for("home")
+        next_page = request.args.get('next')
+        if not next_page or url_parse(next_page).netloc != '':
+            next_page = url_for('home')
         return redirect(next_page)
-
-    # Prepare Microsoft login URL
     session["state"] = str(uuid.uuid4())
     auth_url = _build_auth_url(scopes=Config.SCOPE, state=session["state"])
-    return render_template(
-        "login.html",
-        title="Sign In",
-        form=form,
-        auth_url=auth_url,
-    )
+    return render_template('login.html', title='Sign In', form=form, auth_url=auth_url)
 
-
-# ----------------------------------------------------------------------
-# OAuth callback from Microsoft Identity
-# ----------------------------------------------------------------------
-@app.route(Config.REDIRECT_PATH)  # must match redirect_uri in Azure AD
-def authorized() -> str:
-    if request.args.get("state") != session.get("state"):
-        return redirect(url_for("home"))
-
-    if "error" in request.args:
+@app.route(Config.REDIRECT_PATH)  # Its absolute URL must match your app's redirect_uri set in AAD
+def authorized():
+    if request.args.get('state') != session.get("state"):
+        return redirect(url_for("home"))  # No-OP. Goes back to Index page
+    if "error" in request.args:  # Authentication/Authorization failure
+        #LOG Error
+        LOG.error('ERROR: Authentication/Authorization failure...')
         return render_template("auth_error.html", result=request.args)
-
-    if request.args.get("code"):
+    if request.args.get('code'):
         cache = _load_cache()
-        msal_app = _build_msal_app(cache=cache)
-        result = msal_app.acquire_token_by_authorization_code(
-            request.args["code"],
-            scopes=Config.SCOPE,
-            redirect_uri=url_for("authorized", _external=True, _scheme="https"),
-        )
-
+        # TODO: Acquire a token from a built msal app, along with the appropriate redirect URI
+        # DONE
+        result = _build_msal_app(cache=cache).acquire_token_by_authorization_code(
+     request.args['code'],
+     scopes=Config.SCOPE,
+     redirect_uri=url_for('authorized', _external=True, _scheme='https'))
         if "error" in result:
+            #LOG Error
+            LOG.error('ERROR: Did not acquire a token for OAUTH...')
             return render_template("auth_error.html", result=result)
-
         session["user"] = result.get("id_token_claims")
-        # For demo we always log the user in as the admin account
-        admin_user = User.query.filter_by(username="admin").first()
-        login_user(admin_user)
+        # Note: In a real app, we'd use the 'name' property from session["user"] below
+        # Here, we'll use the admin username for anyone who is authenticated by MS
+        user = User.query.filter_by(username="admin").first()
+        login_user(user)
         _save_cache(cache)
-        LOG.info("INFO: User logged in via Microsoft Identity")
+        # LOG
+        LOG.info('INFO: User Logged In...')
+    return redirect(url_for('home'))
 
-    return redirect(url_for("home"))
-
-
-# ----------------------------------------------------------------------
-# Logout
-# ----------------------------------------------------------------------
-@app.route("/logout")
-def logout() -> str:
+@app.route('/logout')
+def logout():
+    #LOG
+    LOG.info('INFO: User ' + str(current_user.id) + ' logged out...')
     logout_user()
-    if session.get("user"):  # Microsoft login session
+    if session.get("user"): # Used MS Login
+        # Wipe out user and its token cache from session
         session.clear()
-        logout_url = (
-            f"{Config.AUTHORITY}/oauth2/v2.0/logout"
-            f"?post_logout_redirect_uri={url_for('login', _external=True)}"
-        )
-        return redirect(logout_url)
+        # Also logout from your tenant's web session        
+        return redirect(
+            Config.AUTHORITY + "/oauth2/v2.0/logout" +
+            "?post_logout_redirect_uri=" + url_for("login", _external=True))
 
-    return redirect(url_for("login"))
+    return redirect(url_for('login'))
 
-
-# ----------------------------------------------------------------------
-# MSAL helper functions
-# ----------------------------------------------------------------------
-def _load_cache() -> msal.SerializableTokenCache:
+def _load_cache():
+    # TODO: Load the cache from `msal`, if it exists
+    # DONE
     cache = msal.SerializableTokenCache()
-    if session.get("token_cache"):
-        cache.deserialize(session["token_cache"])
+    if session.get('token_cache'):
+        cache.deserialize(session['token_cache'])
     return cache
 
-
-def _save_cache(cache: msal.SerializableTokenCache) -> None:
+def _save_cache(cache):
+    # TODO: Save the cache, if it has changed
+    # DONE
     if cache.has_state_changed:
-        session["token_cache"] = cache.serialize()
+        session['token_cache'] = cache.serialize()
 
-
-def _build_msal_app(
-    cache: Optional[msal.SerializableTokenCache] = None, authority: Optional[str] = None
-) -> msal.ConfidentialClientApplication:
+def _build_msal_app(cache=None, authority=None):
+    # TODO: Return a ConfidentialClientApplication
+    # DONE
     return msal.ConfidentialClientApplication(
-        Config.CLIENT_ID,
-        authority=authority or Config.AUTHORITY,
-        client_credential=Config.CLIENT_SECRET,
-        token_cache=cache,
-    )
+     Config.CLIENT_ID, authority=authority or Config.AUTHORITY,
+     client_credential=Config.CLIENT_SECRET, token_cache=cache)
 
-
-def _build_auth_url(
-    authority: Optional[str] = None, scopes: Optional[list] = None, state: Optional[str] = None
-) -> str:
+def _build_auth_url(authority=None, scopes=None, state=None):
+    # TODO: Return the full Auth Request URL with appropriate Redirect URI
+    #DONE
     return _build_msal_app(authority=authority).get_authorization_request_url(
-        scopes or [],
-        state=state or str(uuid.uuid4()),
-        redirect_uri=url_for("authorized", _external=True, _scheme="https"),
-    )
+    scopes or [],
+    state=state or str(uuid.uuid4()),
+    redirect_uri=url_for('authorized', _external=True, _scheme='https'))
